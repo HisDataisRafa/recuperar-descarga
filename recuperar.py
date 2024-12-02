@@ -6,7 +6,8 @@ import zipfile
 
 def get_recent_history(api_key, hours_ago=1):
     """
-    Obtiene el historial reciente de generaciones de Eleven Labs
+    Obtiene el historial reciente de generaciones de Eleven Labs y lo organiza en secuencias ABC.
+    La función asume que las generaciones se hicieron en orden: a, b, c, a, b, c, ...
     """
     url = "https://api.elevenlabs.io/v1/history"
     headers = {
@@ -17,9 +18,11 @@ def get_recent_history(api_key, hours_ago=1):
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
+            # Obtenemos el historial y lo ordenamos por fecha (más reciente primero)
             history = response.json().get('history', [])
+            history.sort(key=lambda x: x['date'], reverse=True)
             
-            # Filtrar por tiempo reciente
+            # Filtramos por tiempo
             current_time = datetime.utcnow()
             recent_items = []
             
@@ -27,12 +30,42 @@ def get_recent_history(api_key, hours_ago=1):
                 item_time = datetime.fromisoformat(item['date'].replace('Z', '+00:00'))
                 if current_time - item_time <= timedelta(hours=hours_ago):
                     recent_items.append(item)
+                else:
+                    # Como están ordenados por fecha, podemos romper el ciclo
+                    break
             
-            return recent_items
-        return []
+            # Organizamos en grupos de tres (a, b, c)
+            version_a = []
+            version_b = []
+            version_c = []
+            
+            # Como el historial está ordenado del más reciente al más antiguo,
+            # necesitamos procesar en grupos de 3 en orden inverso
+            for i in range(0, len(recent_items), 3):
+                group = recent_items[i:i+3]
+                # Revertimos el grupo para mantener el orden a, b, c
+                group.reverse()
+                
+                # Asignamos cada item a su versión correspondiente
+                for j, item in enumerate(group):
+                    if j == 0:
+                        version_a.append(item)
+                    elif j == 1:
+                        version_b.append(item)
+                    elif j == 2:
+                        version_c.append(item)
+            
+            return {
+                'a': version_a,
+                'b': version_b,
+                'c': version_c
+            }
+        
+        st.error(f"Error en la respuesta de la API: {response.status_code}")
+        return None
     except Exception as e:
         st.error(f"Error al obtener el historial: {str(e)}")
-        return []
+        return None
 
 def download_audio_from_history(api_key, history_item_id):
     """
@@ -53,9 +86,9 @@ def download_audio_from_history(api_key, history_item_id):
         st.error(f"Error al descargar audio: {str(e)}")
         return None
 
-def create_version_zip(audio_files, version):
+def create_version_zip(audio_files):
     """
-    Crea un archivo ZIP para una versión específica
+    Crea un archivo ZIP con los audios, manteniendo el orden correcto
     """
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -63,9 +96,9 @@ def create_version_zip(audio_files, version):
             zip_file.writestr(f"{i}.mp3", audio)
     return zip_buffer.getvalue()
 
-def recover_audio_files():
-    st.title("🔄 Recuperador de Audios de Eleven Labs")
-    st.write("Recupera tus archivos de audio recientes aunque la interfaz se haya reiniciado")
+def main():
+    st.title("🎙️ Recuperador de Audios de Eleven Labs")
+    st.write("Recupera tus archivos de audio recientes organizados por versiones A, B y C")
     
     api_key = st.text_input("API Key de Eleven Labs", type="password")
     hours = st.number_input("Recuperar audios de las últimas X horas", 
@@ -73,89 +106,80 @@ def recover_audio_files():
                            max_value=24, 
                            value=1)
     
-    if st.button("Buscar audios recientes"):
+    if st.button("Recuperar audios"):
         if not api_key:
             st.warning("Por favor ingresa tu API key")
             return
+        
+        with st.spinner("Buscando y organizando audios recientes..."):
+            # Obtenemos el historial organizado por versiones
+            versions = get_recent_history(api_key, hours)
             
-        with st.spinner("Buscando audios recientes..."):
-            recent_history = get_recent_history(api_key, hours)
-            
-            if not recent_history:
-                st.warning("No se encontraron audios recientes")
+            if not versions:
+                st.warning("No se encontraron audios en el período especificado")
                 return
             
-            # Agrupar por conjuntos de tres (a, b, c)
-            grouped_items = {}
-            for item in recent_history:
-                # Extraer el número de fragmento del texto
-                text_start = item.get('text', '')[:50]  # Primeros 50 caracteres para identificar
-                if text_start not in grouped_items:
-                    grouped_items[text_start] = []
-                grouped_items[text_start].append(item)
+            # Verificamos si hay elementos en cada versión
+            if not any(versions.values()):
+                st.warning("No se encontraron secuencias completas de audio")
+                return
             
-            # Procesar cada grupo
-            version_a = []
-            version_b = []
-            version_c = []
+            # Procesamos cada versión
+            version_contents = {'a': [], 'b': [], 'c': []}
+            progress_text = st.empty()
             
-            with st.status("Descargando audios...") as status:
-                total_groups = len(grouped_items)
-                for i, (text, items) in enumerate(grouped_items.items()):
-                    status.update(label=f"Procesando grupo {i+1} de {total_groups}")
-                    
-                    # Ordenar por fecha para mantener el orden a, b, c
-                    items.sort(key=lambda x: x['date'])
-                    
-                    for j, item in enumerate(items[:3]):  # Tomar solo los primeros 3 de cada grupo
-                        audio = download_audio_from_history(api_key, item['history_item_id'])
-                        if audio:
-                            if j == 0:
-                                version_a.append(audio)
-                            elif j == 1:
-                                version_b.append(audio)
-                            else:
-                                version_c.append(audio)
+            for version, items in versions.items():
+                progress_text.text(f"Descargando versión {version.upper()}...")
+                for item in items:
+                    audio = download_audio_from_history(api_key, item['history_item_id'])
+                    if audio:
+                        version_contents[version].append(audio)
             
-            # Crear los ZIPs
-            if version_a or version_b or version_c:
-                st.success("¡Audios recuperados con éxito!")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                if version_a:
-                    with col1:
-                        zip_a = create_version_zip(version_a, 'a')
-                        st.download_button(
-                            "⬇️ Descargar versión A",
-                            data=zip_a,
-                            file_name=f"recovered_versionA_{timestamp}.zip",
-                            mime="application/zip",
-                            key="download_recovered_a"
-                        )
-                
-                if version_b:
-                    with col2:
-                        zip_b = create_version_zip(version_b, 'b')
-                        st.download_button(
-                            "⬇️ Descargar versión B",
-                            data=zip_b,
-                            file_name=f"recovered_versionB_{timestamp}.zip",
-                            mime="application/zip",
-                            key="download_recovered_b"
-                        )
-                
-                if version_c:
-                    with col3:
-                        zip_c = create_version_zip(version_c, 'c')
-                        st.download_button(
-                            "⬇️ Descargar versión C",
-                            data=zip_c,
-                            file_name=f"recovered_versionC_{timestamp}.zip",
-                            mime="application/zip",
-                            key="download_recovered_c"
-                        )
+            # Creamos y ofrecemos la descarga de cada versión
+            st.subheader("📥 Descargar archivos")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            if version_contents['a']:
+                with col1:
+                    st.download_button(
+                        "⬇️ Descargar versión A",
+                        data=create_version_zip(version_contents['a']),
+                        file_name=f"recovered_versionA_{timestamp}.zip",
+                        mime="application/zip",
+                        key="download_a"
+                    )
+                    st.caption(f"{len(version_contents['a'])} archivos")
+            
+            if version_contents['b']:
+                with col2:
+                    st.download_button(
+                        "⬇️ Descargar versión B",
+                        data=create_version_zip(version_contents['b']),
+                        file_name=f"recovered_versionB_{timestamp}.zip",
+                        mime="application/zip",
+                        key="download_b"
+                    )
+                    st.caption(f"{len(version_contents['b'])} archivos")
+            
+            if version_contents['c']:
+                with col3:
+                    st.download_button(
+                        "⬇️ Descargar versión C",
+                        data=create_version_zip(version_contents['c']),
+                        file_name=f"recovered_versionC_{timestamp}.zip",
+                        mime="application/zip",
+                        key="download_c"
+                    )
+                    st.caption(f"{len(version_contents['c'])} archivos")
+            
+            st.success(f"""
+                Archivos recuperados con éxito:
+                - Versión A: {len(version_contents['a'])} archivos
+                - Versión B: {len(version_contents['b'])} archivos
+                - Versión C: {len(version_contents['c'])} archivos
+            """)
 
 if __name__ == "__main__":
-    recover_audio_files()
+    main()
